@@ -105,7 +105,7 @@ dht11 DHT11;
 
 #define DHT11PIN 2
 
-#pragma pack(1)
+#pragma pack(push,1)
 struct day_sched {
   byte on_am;
   byte off_pm;
