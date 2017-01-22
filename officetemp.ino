@@ -43,9 +43,7 @@ const char pass[] = "renandstimpy";    // your network password (use for WPA, or
 int keyIndex = 0;
 
 #define LOG_DATA Serial.print
-#define LOG_DATA_LINE(x) {Serial.println(x);Serial.flush();}
-#define LOG_DATA_LINE2(x,y) {Serial.println(x,y);Serial.flush();}
-
+#define LOG_DATA_LINE Serial.println
 
 // Store the MQTT server, client ID, username, and password in flash memory.
 const char MQTT_SERVER[]     = AIO_SERVER;
@@ -58,8 +56,6 @@ const char MQTT_USERNAME[]   = AIO_USERNAME;
 const char MQTT_PASSWORD[]   = AIO_KEY;
 
 int status = WL_IDLE_STATUS;
-
-
 
 
 // Initialize the Ethernet client library
@@ -75,20 +71,14 @@ Adafruit_MQTT_Publish temp_feed = Adafruit_MQTT_Publish(&mqtt, TEMPERATURE_FEED)
 const char HUMIDITY_FEED[]  = AIO_USERNAME "/feeds/humidity";
 Adafruit_MQTT_Publish humidity_feed = Adafruit_MQTT_Publish(&mqtt, HUMIDITY_FEED);
 
-const char SETTEMP_FEED[]  = AIO_USERNAME "/feeds/set_temp";
+const char SETTEMP_FEED[]  = AIO_USERNAME "/feeds/office_temp";
 Adafruit_MQTT_Subscribe settemp = Adafruit_MQTT_Subscribe(&mqtt, SETTEMP_FEED);
 
 const char HVAC_FEED[]  = AIO_USERNAME "/feeds/hvac";
 Adafruit_MQTT_Publish hvac_feed = Adafruit_MQTT_Publish(&mqtt, HVAC_FEED);
 
-const char SLOPE_FEED[]  = AIO_USERNAME "/feeds/slope";
-Adafruit_MQTT_Publish slope_feed = Adafruit_MQTT_Publish(&mqtt, SLOPE_FEED);
-
-#ifdef TIMEFEED
-Adafruit_MQTT_Client mqtt2(&client, AIO_SERVER, 8883);
-const char TIME_FEED[]  = "time/ISO-8601";
-Adafruit_MQTT_Subscribe timefeed = Adafruit_MQTT_Subscribe(&mqtt2, TIME_FEED);
-#endif
+const char TIME_FEED[]  = AIO_USERNAME "/time/ISO-8601";
+//Adafruit_MQTT_Subscribe timefeed = Adafruit_MQTT_Subscribe(&mqtt, TIME_FEED);
 
 #define LED_PIN 13
 RTC rtc;
@@ -105,7 +95,7 @@ dht11 DHT11;
 
 #define DHT11PIN 2
 
-#pragma pack(push,1)
+#pragma pack(1)
 struct day_sched {
   byte on_am;
   byte off_pm;
@@ -129,7 +119,13 @@ struct EEPROM_DATA eedata = {
 };
 #pragma pack(pop)
 
-float GetDHT11Temp()
+float CtoF(float celsius)
+{
+	float fahrenheit = (1.8 * celsius) + 32;
+	return fahrenheit;
+}
+
+float thermostat(float *humidity)
 {
   //LOG_DATA_LINE("\n");
 
@@ -157,21 +153,20 @@ float GetDHT11Temp()
       return 0;
   }
 
+  *humidity = DHT11.humidity;
   return DHT11.temperature;
 
 }
 
 int saveworktime;
 
+unsigned long last = 0xffff0000;
 unsigned long last_led = 0;
 int led = 0;
 #define LONG 1000
 #define SHORT 400
 unsigned long led_time = SHORT;
-const unsigned long sample_rate = 60000;
-const unsigned long thermostat_warmup = 2000;  // time to allow the thermostat to sample after powerup
-unsigned long last_thermon = 1000; // turn on thermometer at 1 sec
-unsigned long last_sample = last_thermon + thermostat_warmup; // first thermostat poll at 5sec, then every "sample_rate" seconds
+unsigned long sample_rate = 60000;
 float curTemp = 26;
 
 int last_ee = 0;
@@ -199,10 +194,7 @@ void setup() {
 #endif
 
   //Initialize serial and wait for port to open:
-  Serial.begin(115200);
-
-  LOG_DATA("reset: ");
-  LOG_DATA_LINE(resettype);
+  Serial.begin(9600);
 
 #ifdef VERBOSE
   LOG_DATA_LINE("WINC1500 Web client test");
@@ -286,15 +278,14 @@ void setup() {
 #ifdef VERBOSE
     LOG_DATA("MCP9808 Current temp: ");
 
-    LOG_DATA_LINE2(tempsensor.readTempC(), 2);
+    LOG_DATA_LINE(tempsensor.readTempC(), 2);
     LOG_DATA_LINE("");
 #endif
   }
 
   control.setTemp(26);
-  //wdt_enable(WDTO_4S);
+  wdt_enable(WDTO_4S);
   mqtt.subscribe(&settemp);
-  mqtt.will(0, 0, 0, 1);
 
 }
 
@@ -304,7 +295,7 @@ void setup() {
 
 // Function to connect and reconnect as necessary to the MQTT server.
 // Should be called in the loop function and it will take care if connecting.
-bool MQTT_connect(Adafruit_MQTT_Client &mqtt) {
+void MQTT_connect() {
   int8_t ret;
 
   // attempt to connect to Wifi network:
@@ -323,32 +314,54 @@ bool MQTT_connect(Adafruit_MQTT_Client &mqtt) {
   }
 
   // Stop if already connected.
-  if (!mqtt.connected()) {
-    LOG_DATA("Connecting to MQTT... ");
-
-    ret = mqtt.connect();
-    if (ret != 0) { // connect will return 0 for connected
-      LOG_DATA_LINE(mqtt.connectErrorString(ret));
-      LOG_DATA_LINE("Retrying MQTT connection in 5 seconds...");
-      mqtt.disconnect();
-    } else
-      LOG_DATA_LINE("Connected to MQTT");
+  if (mqtt.connected()) {
+    return;
   }
-  return mqtt.connected();
+
+  LOG_DATA("Connecting to MQTT... ");
+
+  while ((ret = mqtt.connect()) != 0) { // connect will return 0 for connected
+    LOG_DATA_LINE(mqtt.connectErrorString(ret));
+    LOG_DATA_LINE("Retrying MQTT connection in 2 seconds...");
+    mqtt.disconnect();
+    delay(2000);  // wait 5 seconds
+  }
+  LOG_DATA_LINE("MQTT Connected!");
 }
 
 /************************************************************************************************************************
    LOOP  Section
 */
-bool connected = false;
 void loop() {
   float curtemp;
+  float humidity;
   unsigned long ms;
   int ok;
+  MQTT_connect();
+
+  // Get subscription
+  Adafruit_MQTT_Subscribe *subscription;
+  LOG_DATA("Wait for subscription");
+  // this is our 'wait for incoming subscription packets' busy subloop
+  while (subscription = mqtt.readSubscription(5000)) {
+
+    // we only care about the lamp events
+    if (subscription == &settemp) {
+
+      // convert mqtt ascii payload to int
+      char *value = (char *)settemp.lastread;
+      LOG_DATA(F("Received: "));
+      LOG_DATA_LINE(value);
+      double temp = atof(value);
+
+      LOG_DATA_LINE((float)temp);
+      control.setTemp((float)temp);
+    }
+  }
 
   ms = millis();
-  //      LOG_DATA(ms);
-  //    LOG_DATA(" ");
+//      LOG_DATA(ms);
+//    LOG_DATA(" ");
 
 
 #ifdef SERIAL_INPUT
@@ -384,32 +397,36 @@ void loop() {
     }
   }
 #endif
-  static enum LED_PULSE { LED_START, LED_BLINK, LED_WAIT } led_state = LED_START;
-  static int pulse_count;
+    static enum LED_PULSE { LED_START, LED_BLINK, LED_WAIT } led_state = LED_START;
 
   if (ms - last_led >= led_time) {
+    static int pulse_count;
 
     last_led += led_time;
-    switch (led_state) {
-      case LED_START:
-        led = 0;
-        pulse_count = (control.getstate()) * 2;
-        led_time = LONG;
-        led_state = LED_BLINK;
-        break;
-      case LED_BLINK:
-        --pulse_count;
-        led ^= 1;
-        led_time = SHORT;
-        if (pulse_count <= 0) led_state = LED_WAIT;
-        break;
-      case LED_WAIT:
-        led = 0;
-        led_time = LONG;
-        led_state = LED_START;
-        {
-        }
-        break;
+    switch(led_state) {
+    case LED_START:
+      led = 0;
+      pulse_count = control.getstate()*2;
+      led_time = LONG;
+      led_state = LED_BLINK;
+      LOG_DATA("LED_START:");
+      LOG_DATA_LINE(pulse_count);
+      break;
+    case LED_BLINK:
+      --pulse_count;
+      led ^= 1;
+      led_time = SHORT;
+      if (pulse_count <= 0) led_state = LED_WAIT;
+      LOG_DATA("LED_BLINK:");
+      LOG_DATA(pulse_count);
+      break;
+    case LED_WAIT:
+      led = 0;
+      led_time = LONG;
+      led_state = LED_START;
+      LOG_DATA("LED_WAIT:");
+      LOG_DATA(pulse_count);
+      break;
     }
     digitalWrite(LED_PIN, led);
     wdt_reset();
@@ -433,72 +450,12 @@ void loop() {
     }
   }
 #endif
-  // five seconds before poll, enable thermometer
-  if (ms > last_thermon && led_state == LED_WAIT) {
-    last_thermon += sample_rate;
-    //Serial.print(ms);
-    //Serial.print(":");
-    tempsensor.shutdown_wake(0);
-    //tempsensor.regdump();
-  }
-  if (ms > last_sample && led_state == LED_WAIT) {
-    last_sample += sample_rate;
-    last_thermon = last_sample - thermostat_warmup;
-
+  if (ms - last >= sample_rate && led_state == LED_WAIT) {
+    last += sample_rate;
+      LOG_DATA_LINE("poll");
 
     digitalWrite(LED_PIN, HIGH);
-#ifdef TIMEFEED
-    connected = MQTT_connect(mqtt2);
-
-    if (connected) {
-      // Get subscription
-      Adafruit_MQTT_Subscribe *subscription;
-      //LOG_DATA("Wait for subscription");
-      // this is our 'wait for incoming subscription packets' busy subloop
-      while (subscription = mqtt2.readSubscription(5000)) {
-
-        if (subscription == &timefeed) {
-          char *value = (char *)settemp.lastread;
-          LOG_DATA(F("Received timefeed: "));
-          LOG_DATA_LINE(value);
-
-        }
-
-      }
-    }
-#endif
-    connected = MQTT_connect(mqtt);
-
-    if (connected) {
-      // Get subscription
-      Adafruit_MQTT_Subscribe *subscription;
-      //LOG_DATA("Wait for subscription");
-      // this is our 'wait for incoming subscription packets' busy subloop
-      while (subscription = mqtt.readSubscription(5000)) {
-
-        // we only care about the lamp events
-        if (subscription == &settemp) {
-
-          // convert mqtt ascii payload to int
-          char *value = (char *)settemp.lastread;
-          LOG_DATA(F("Received: "));
-          LOG_DATA_LINE(value);
-          double temp = atof(value);
-
-          LOG_DATA_LINE((float)temp);
-          control.setTemp((float)temp);
-        }
-
-      }
-    } else {
-      LOG_DATA_LINE("Connect error");
-      pulse_count = 20;
-      led_time = SHORT;
-      led_state = LED_BLINK;
-      led = 0;
-    }
-
-
+  LOG_DATA("... get rtc");
 #ifdef VERBOSE
     rtc.displayTime(&Serial);
 #endif
@@ -514,7 +471,7 @@ void loop() {
     rtc.displayTime(lcd);
 #endif
 
-    curtemp = GetDHT11Temp();
+    curtemp = thermostat(&humidity);
     if (curtemp == 0) {
       LOG_DATA_LINE("Temp failed");
       return;
@@ -526,38 +483,48 @@ void loop() {
 #endif
 
     if (!notemp) {
+      tempsensor.shutdown_wake(0);
       // Read and print out the temperature, then convert to *F
       curtemp = tempsensor.readTempC();
-      //tempsensor.regdump();
       tempsensor.shutdown_wake(1);
-    } else {
-      LOG_DATA("NO MCP9808 ");
     }
 
-#ifdef VERBOSE
+#ifdef SERIAL_OUT
     LOG_DATA((float)DHT11.humidity, 2);
     LOG_DATA("% ");
     LOG_DATA((float)curtemp, 2);
     LOG_DATA("C Req:");
 #endif
 
+    // Publish data
+    float state = control.getstate();
+    hvac_feed.publish(state);
+    ok = temp_feed.publish(curtemp);
+#ifdef VERBOSE
+    if (!ok)
+      LOG_DATA_LINE(F("Failed to publish temperature"));
+    else
+      LOG_DATA_LINE(F("Temperature published!"));
+#endif
+    humidity = (float)DHT11.humidity;
+    ok = humidity_feed.publish(humidity);
+#ifdef VERBOSE
+    if (!ok)
+      LOG_DATA_LINE(F("Failed to publish humidity"));
+    else
+      LOG_DATA_LINE(F("Humidity published!"));
+#endif
     int hour = rtc.getHour();
 
     // 5am to 10pm
     enum RTC::DAYOFWEEK weekday = rtc.getDow();
-    int worktime = (hour > 4 && hour < 20) && (weekday >= RTC::DAYOFWEEK::DAY_MONDAY && weekday <= RTC::DAY_FRIDAY);
+    int worktime = (hour > 4 && hour < 20) && (weekday > RTC::DAYOFWEEK::DAY_MONDAY && weekday < RTC::DAY_FRIDAY);
     if (worktime != saveworktime)
       control.setWorktime(worktime);
     saveworktime = worktime;
 
-    float set_temp = control.updateTemp(curtemp, DHT11.humidity);
-    // Publish data
-    if (connected) {
-      publishData(curtemp);
-    } else {
-      LOG_DATA_LINE("Connect error. NO PUBLISH");
-    }
-#ifdef VERBOSE
+    int set_temp = control.updateTemp(curtemp, humidity);
+#ifdef SERIAL_OUTPUT
     LOG_DATA(" ");
     LOG_DATA(set_temp);
 
@@ -567,36 +534,24 @@ void loop() {
 
   }
 
+  /*  if (client.connected()) {
+      // if there are incoming bytes available
+      // from the server, read them and print them:
+      while (client.available()) {
+        char c = client.read();
+        Serial.write(c);
+      }
+    }
+    if (!client.connected()) {
+    // if the server's disconnected, stop the client:
+      LOG_DATA_LINE();
+      LOG_DATA_LINE("disconnecting from server.");
+      client.stop();
+    }
+  */
 }
 
-void publishData(float curtemp)
-{
-  int ok;
-  float humidity;
 
-
-  float state = control.getstate();
-  hvac_feed.publish(state);
-  ok = temp_feed.publish(curtemp);
-#ifdef VERBOSE
-  if (!ok) {
-    LOG_DATA_LINE(F("Failed to publish temperature"));
-  }else{
-    LOG_DATA_LINE(F("State"));
-  }
-#endif
-  humidity = (float)DHT11.humidity;
-  ok = humidity_feed.publish(humidity);
-#ifdef VERBOSE
-  if (!ok) {
-    LOG_DATA_LINE(F("Failed to publish humidity"));
-  }
-  //else
-  //  LOG_DATA_LINE(F("Humidity published!"));
-#endif
-  slope_feed.publish(control.getSlope());
-
-}
 void printWifiStatus() {
   // print the SSID of the network you're attached to:
   //  LOG_DATA("SSID: ");
@@ -614,4 +569,3 @@ void printWifiStatus() {
   //  LOG_DATA_LINE(" dBm");
 
 }
-
