@@ -35,10 +35,6 @@ Adafruit_WINC1500 WiFi(WINC_CS, WINC_IRQ, WINC_RST);
 
 
 #include "/kghome.h"
-#define AIO_SERVER      "io.adafruit.com"
-#define AIO_SERVERPORT  1883
-#define AIO_USERNAME    "kurtgodwin"
-#define AIO_KEY         "f9e0538739574301b56f9fca577c717f"
 int keyIndex = 0;
 
 #define LOG_DATA Serial.print
