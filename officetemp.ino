@@ -34,8 +34,7 @@ Adafruit_WINC1500 WiFi(WINC_CS, WINC_IRQ, WINC_RST);
 //Adafruit_WINC1500 WiFi;
 
 
-const char ssid[] = "kghome-e24";     //  your network SSID (name)
-const char pass[] = "renandstimpy";    // your network password (use for WPA, or use as key for WEP)
+#include "/kghome.h"
 #define AIO_SERVER      "io.adafruit.com"
 #define AIO_SERVERPORT  1883
 #define AIO_USERNAME    "kurtgodwin"
